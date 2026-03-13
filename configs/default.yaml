@@ -1,0 +1,44 @@
+project:
+  name: alpha_tracker2
+  timezone: "Asia/Shanghai"
+
+paths:
+  # 你设计里建议 Parquet + DuckDB 双层：lake 存面板，store 存仪表盘表
+  lake_dir: "data/lake"
+  store_dir: "data/store"
+  store_db: "data/store/alpha_tracker.duckdb"
+  runs_dir: "data/runs"   # 先预留，后续 run_daily 会用
+
+logging:
+  level: "INFO"
+
+# 先占位：后续我们做插件注册/动态加载时再填实
+plugins:
+  models: []
+  strategies: []
+
+ingestion:
+  universe_provider: "akshare"   # 可切换为 "akshare"
+  prices_provider: "akshare_prices"
+
+scoring:
+  score_versions: ["V1", "V2", "V3", "V4"]
+
+  # Step 4: V2/V3/V4 共用筛选强度配置（不改逻辑，只把参数从代码移到配置）
+  # q: 历史分位数阈值（越大越严格，越容易出现 V3=1）
+  # window: 历史窗口长度（用于滚动分位数）
+  # topk_fallback: 过滤后为空时兜底保留 topK（避免全空）
+  v2_v3_v4:
+    common:
+      q: 0.80
+      window: 60
+      topk_fallback: 50
+
+experiments:
+  matrix:
+    models: ["V1", "V2", "V3", "V4"]
+    trade_rules: ["REB_ON_SIGNAL_CHANGE", "REB_DAILY"]
+    holds: [1, 5, 20]
+    topk: 6
+    cost_bps: 10
+    lot_size: 100

@@ -1,0 +1,397 @@
+alpha_tracker2 项目交接文档（完整版）
+
+版本状态：MVP 已完整跑通（数据 → 选股 → 评估 → 组合 → Dashboard）
+当前定位：单机 / 本地量化研究与策略对比系统（A 股日频，多策略并行）
+
+一、项目总体目标与设计思路（What & Why）
+1. 项目要解决什么问题
+
+alpha_tracker2 的目标不是“找一个最强策略”，而是：
+
+在同一套行情、成本、规则基线下
+
+并行运行多套策略 / 模型（V1 / V2 / V3 / V4 / 未来 V5+）
+
+完整记录：信号 → 真实未来收益 → 组合净值 → 评估指标
+
+通过可视化面板，对比“策略进化是否真的带来改进”
+
+这是一个 研究 + 评估 + 实验闭环系统，不是单一回测脚本。
+
+2. 核心设计原则（工程约束）
+
+多策略并行而非覆盖
+
+每个版本（V1~V4）逻辑独立
+
+结果必须可横向比较
+
+评估必须用真实未来收益
+
+信号日 ≠ 评估日
+
+支持 asof（walk-forward）评估
+
+数据与结果分层
+
+大面板：Parquet（lake）
+
+快速查询 / Dashboard：DuckDB（store）
+
+流水线可重放
+
+backfill_runs / eval_5d_batch 可重复跑历史区间
+
+最终必须可视化操作
+
+本地 Streamlit Dashboard
+
+能点按钮调 pipeline，看结果
+
+二、当前项目整体结构说明（As-Is）
+顶层目录结构（你当前真实状态）
+alpha_tracker2/
+├── apps/                    # 可视化应用
+│   └── dashboard_streamlit/
+│       └── app.py
+│
+├── configs/
+│   └── default.yaml         # 全局配置（DB 路径、参数）
+│
+├── data/
+│   ├── cache/
+│   │   └── ab_threshold_history.json
+│   │
+│   ├── lake/                # 原始/对齐后的大数据（Parquet）
+│   │   ├── prices/          # 分 ticker 缓存行情
+│   │   └── universe/        # 每日股票池快照
+│   │
+│   ├── out/                 # pipeline 输出 CSV（给 dashboard 用）
+│   │
+│   └── store/
+│       └── alpha_tracker.duckdb
+│
+├── src/
+│   └── alpha_tracker2/
+│       ├── core/
+│       ├── ingestion/
+│       ├── scoring/
+│       ├── pipelines/
+│       ├── storage/
+│       └── strategies/      # 预留
+│
+├── run_smoke.ps1 / .bat     # 一键环境/冒烟测试
+├── verify_env.py
+├── 设计思路.txt
+└── 项目进程.txt
+
+三、核心模块逐一说明（What exists & What it does）
+1️⃣ ingestion（数据获取层）
+ingest_universe.py
+
+功能：
+拉取 某交易日的股票池（A 股可交易股票）
+
+输出：
+
+data/lake/universe/YYYY-MM-DD/universe.parquet
+
+duckdb.universe_daily
+
+重要注意
+
+backfill 时如果不指定 --tickers，必须先跑它
+
+ingest_prices.py
+
+功能：
+拉取指定 ticker 的 历史收盘价窗口
+
+特点：
+
+使用 Parquet cache（避免重复请求）
+
+输出：
+
+data/lake/prices/{ticker}/*.parquet
+
+duckdb.prices_daily
+
+已解决问题：
+
+✅ 重复插入（UNIQUE + merge）
+
+✅ 日期窗口不足导致评估为 0
+
+2️⃣ scoring（模型/打分层）
+score_v1.py
+
+规则型 baseline
+
+不依赖训练
+
+输出：score / rank
+
+scoring/plugins/
+
+v1_baseline.py
+
+v2_v3_v4.py
+
+vx_placeholder.py
+
+👉 当前 V2/V3/V4 仍共用一套 ML 逻辑，只是阈值/筛选不同
+👉 插件化结构已经搭好，可继续拆分
+
+ab_threshold_history.json（非常关键）
+
+作用：
+
+保存 历史滚动分位数阈值
+
+避免“当天样本太少 → 阈值跳变”
+
+这是你之前踩坑后升级的核心改进点
+
+3️⃣ pipelines（流水线层，系统中枢）
+
+这是当前项目最成熟、最有价值的部分。
+
+backfill_runs.py
+
+功能：
+
+批量跑：universe → prices → features → score
+
+已踩坑总结：
+
+❌ 不传 tickers 会直接报错
+
+✅ 已支持 --tickers
+
+build_features.py
+
+功能：
+
+从 prices 构建 features_daily
+
+坑：
+
+❌ trade_date 对不上会导致 score_all 报 “No features”
+
+score_all.py
+
+功能：
+
+对某日所有版本 V1~V4 统一打分
+
+关键点：
+
+version 是第一等公民
+
+不同版本不能覆盖彼此结果
+
+eval_5d.py / eval_5d_batch.py
+
+功能：
+
+用真实未来价格评估 5 日收益
+
+支持 asof（walk-forward）
+
+重要概念：
+
+asof ≠ trade_date
+
+picks_date = asof - horizon
+
+portfolio_nav.py
+
+功能：
+
+把 picks → 日收益 → NAV
+
+坑总结：
+
+❌ config 路径写死
+
+❌ Settings 缺字段
+
+✅ 已修正为统一 default.yaml
+
+make_dashboard.py
+
+功能：
+
+聚合 NAV / 指标
+
+输出 dashboard CSV
+
+4️⃣ storage（数据存储层）
+DuckDB（alpha_tracker.duckdb）
+
+当前已稳定使用的表包括：
+
+universe_daily
+
+prices_daily
+
+features_daily
+
+picks_daily
+
+portfolio_nav
+
+model_eval_5d*
+
+duckdb_store.py + schema.sql
+
+所有 pipeline 必须通过这里写库
+
+避免各自 duckdb.connect() 乱写
+
+5️⃣ Dashboard（apps/dashboard_streamlit）
+app.py
+
+正确启动方式（⚠️ 非 python）：
+
+streamlit run apps/dashboard_streamlit/app.py
+
+
+你之前看到的 missing ScriptRunContext
+不是 bug，而是启动方式错误
+
+已实现功能
+
+参数侧栏（日期 / versions / topk）
+
+DuckDB 表概览
+
+picks 统计
+
+NAV 对比图
+
+5D batch summary 表
+
+👉 当前截图显示：Dashboard 逻辑是正确的
+
+四、当前项目进展总结（非常重要）
+✅ 已完全跑通（可反复）
+
+数据拉取（含缓存）
+
+多版本打分（V1~V4）
+
+asof / batch 评估
+
+组合净值计算
+
+Dashboard 展示
+
+🟡 半成品 / 结构已预留
+
+strategies 插件（调仓 / 风控）
+
+modeling 进一步拆分
+
+多资产支持（接口层）
+
+❌ 尚未实现（但不影响当前系统）
+
+真正的 ML 训练 pipeline
+
+风控模块（止损/止盈）
+
+实盘 broker
+
+五、踩过的坑 & 已解决问题清单（重点）
+1️⃣ PowerShell / 命令行
+
+反引号 ` 才是 PowerShell 的换行符
+
+python app.py ≠ streamlit run app.py
+
+2️⃣ 参数与日期
+
+trade_date ≠ asof
+
+eval_5d 默认用 未来数据
+
+asof 模式下：
+
+picks_date = asof - horizon
+
+3️⃣ 数据库
+
+❌ 不能假设表有数据
+
+❌ 不能重复 insert
+
+✅ 必须先 ingest → features → score
+
+✅ 所有写入统一 duckdb_store
+
+4️⃣ 阈值与样本量
+
+❌ 当天分位数不稳定
+
+✅ 使用历史滚动分位数缓存（ab_threshold_history.json）
+
+六、下一阶段实施规划（不立即做，仅规划）
+Phase 1（优先）
+
+把 scoring → model plugin 抽象
+
+把 TopK / AB 策略抽成 strategy plugin
+
+Phase 2
+
+forward_returns 扩展到 1/5/10 + hit rate
+
+Dashboard 增加 Signal Quality 页面
+
+Phase 3
+
+多资产（基金）
+
+风控 / 调仓插件
+
+七、新对话框需要你重新提供的文件清单（⚠️ 必须）
+
+请在新对话框一开始上传或粘贴：
+
+必须文件
+
+src/alpha_tracker2/pipelines/（整个目录）
+
+src/alpha_tracker2/scoring/
+
+src/alpha_tracker2/storage/duckdb_store.py
+
+apps/dashboard_streamlit/app.py
+
+configs/default.yaml
+
+可选但强烈建议
+
+schema.sql
+
+ab_threshold_history.json
+
+设计思路.txt
+
+项目进程.txt
+
+八、交接结论
+
+你现在的系统 不是半吊子脚本
+
+而是一个：
+
+可重复、可扩展、可评估、可视化的多策略量化研究系统
+
+新对话框的任务应是：
+
+在不破坏现有 pipeline 的前提下
+
+做插件化与分析能力升级
