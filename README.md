@@ -296,6 +296,19 @@ python -m alpha_tracker2.pipelines.run_daily --start 2025-01-01 --end 2025-12-31
 6. portfolio_nav / nav_from_positions  
 7. make_dashboard  
 
+### Dashboard（D-1 / D-2）
+
+- **数据准备**：先跑 `run_daily` 或单独跑 `make_dashboard`，将 nav、eval、picks、eval_summary、quintile_returns、ic_series 等导出到 `data/out/`。  
+  ```bash
+  PYTHONPATH=src python -m alpha_tracker2.pipelines.make_dashboard --start YYYY-MM-DD --end YYYY-MM-DD
+  ```
+  （make_dashboard 内部会调用 eval_5d_batch 生成 quintile_returns.csv 与 ic_series.csv；可选 `--with-diagnostics` 生成 version_compare.csv、factor_analysis.csv。）
+
+- **Streamlit 启动**：在仓库根目录执行，浏览器打开即可查看 NAV、picks、评估面板。  
+  ```bash
+  PYTHONPATH=src streamlit run apps/dashboard_streamlit/app.py
+  ```
+
 ---
 
 ## 七、小结

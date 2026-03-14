@@ -83,7 +83,7 @@ def ensure_score_frame(df: pd.DataFrame) -> pd.DataFrame:
     # Use pd.to_numeric with errors='coerce' then keep as float
     result["score"] = pd.to_numeric(result["score"], errors="coerce")
 
-    if result["score"].isna().all():
+    if len(result) > 0 and result["score"].isna().all():
         raise ValueError("All scores are NaN after coercion; check scorer implementation.")
 
     return result

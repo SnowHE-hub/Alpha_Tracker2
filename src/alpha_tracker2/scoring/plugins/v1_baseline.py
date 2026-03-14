@@ -3,12 +3,39 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Mapping
 
 import pandas as pd
+import yaml
 
 from alpha_tracker2.scoring.base import Scorer, ensure_score_frame
 from alpha_tracker2.storage.duckdb_store import DuckDBStore
+
+
+def load_v1_config(project_root: Path) -> "V1Config":
+    """
+    Load V1 factor weights from configs/default.yaml scoring.v1.weights.
+    If missing or invalid, fall back to DEFAULT_V1_WEIGHTS.
+    """
+    cfg_path = project_root / "configs" / "default.yaml"
+    if not cfg_path.is_file():
+        return V1Config(weights=dict(DEFAULT_V1_WEIGHTS))
+    with cfg_path.open("r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    weights_cfg = (raw.get("scoring") or {}).get("v1") or {}
+    w = weights_cfg.get("weights") if isinstance(weights_cfg, dict) else None
+    if not isinstance(w, dict) or not w:
+        return V1Config(weights=dict(DEFAULT_V1_WEIGHTS))
+    weights = {}
+    for k, v in w.items():
+        try:
+            weights[str(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    if not weights:
+        return V1Config(weights=dict(DEFAULT_V1_WEIGHTS))
+    return V1Config(weights=weights)
 
 
 @dataclass(frozen=True)

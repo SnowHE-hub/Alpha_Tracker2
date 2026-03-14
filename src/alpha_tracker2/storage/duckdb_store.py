@@ -27,14 +27,30 @@ class DuckDBStore:
         Initialize the database schema from the schema.sql file.
 
         The SQL file may contain multiple statements.
+        After applying schema.sql, ensures features_daily has bt_* columns (I-1 migration).
         """
         if not self.schema_path.is_file():
             raise FileNotFoundError(f"Schema file not found: {self.schema_path}")
 
         sql = self.schema_path.read_text(encoding="utf-8")
         with self.session() as conn:
-            # DuckDB can execute multiple statements in a single execute call.
             conn.execute(sql)
+            self._migrate_features_daily_bt_columns(conn)
+
+    @staticmethod
+    def _migrate_features_daily_bt_columns(conn: duckdb.DuckDBPyConnection) -> None:
+        """Add bt_mean, bt_winrate, bt_worst_mdd to features_daily if missing (idempotent)."""
+        try:
+            existing = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'features_daily' AND column_name IN ('bt_mean','bt_winrate','bt_worst_mdd')"
+            ).fetchall()
+        except Exception:
+            return
+        existing_names = {row[0] for row in existing}
+        for col in ("bt_mean", "bt_winrate", "bt_worst_mdd"):
+            if col not in existing_names:
+                conn.execute(f"ALTER TABLE features_daily ADD COLUMN {col} DOUBLE")
 
     def exec(self, sql: str, params: Optional[Sequence[object]] = None) -> None:
         """

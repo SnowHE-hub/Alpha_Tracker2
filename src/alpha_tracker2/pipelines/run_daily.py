@@ -10,7 +10,7 @@ CLI:
   Range:      --start YYYY-MM-DD --end YYYY-MM-DD
 
   Optional skip flags: --skip-ingest-universe, --skip-prices, --skip-features,
-  --skip-score, --skip-eval, --skip-nav, --skip-dashboard
+  --skip-score, --skip-ensemble, --skip-eval, --skip-nav, --skip-dashboard
 
   Optional pass-through: --limit N, --topk N (passed to build_features / portfolio_nav etc.
   when applicable).
@@ -60,6 +60,7 @@ def main() -> None:
     parser.add_argument("--skip-prices", action="store_true", help="Skip ingest_prices")
     parser.add_argument("--skip-features", action="store_true", help="Skip build_features")
     parser.add_argument("--skip-score", action="store_true", help="Skip score_all")
+    parser.add_argument("--skip-ensemble", action="store_true", help="Skip score_ensemble (after score_all)")
     parser.add_argument("--skip-eval", action="store_true", help="Skip eval_5d")
     parser.add_argument("--skip-nav", action="store_true", help="Skip portfolio_nav")
     parser.add_argument("--skip-dashboard", action="store_true", help="Skip make_dashboard")
@@ -101,6 +102,7 @@ def main() -> None:
                 "prices": args.skip_prices,
                 "features": args.skip_features,
                 "score": args.skip_score,
+                "ensemble": args.skip_ensemble,
                 "eval": args.skip_eval,
                 "nav": args.skip_nav,
                 "dashboard": args.skip_dashboard,
@@ -124,6 +126,7 @@ def main() -> None:
     from alpha_tracker2.pipelines import make_dashboard
     from alpha_tracker2.pipelines import portfolio_nav
     from alpha_tracker2.pipelines import score_all
+    from alpha_tracker2.pipelines import score_ensemble
 
     sd = single_date.isoformat()
     s_str = start.isoformat()
@@ -156,6 +159,10 @@ def main() -> None:
     # 4. score_all (single date)
     if not args.skip_score:
         _invoke_main(score_all.main, ["--date", sd])
+
+    # 4b. score_ensemble (single date; writes version='ENS')
+    if not args.skip_ensemble:
+        _invoke_main(score_ensemble.main, ["--date", sd])
 
     # 5. eval_5d (single date, as_of = single_date)
     if not args.skip_eval:

@@ -73,3 +73,15 @@ def load_settings(project_root: Path) -> Settings:
         timezone=timezone,
     )
 
+
+def get_raw_config(project_root: Path) -> dict[str, Any]:
+    """
+    Load the full config dict from configs/default.yaml.
+    Use for reading scoring.v1.weights, scoring.v2_v3_v4.bt_column_weights, etc.
+    """
+    config_path = project_root / "configs" / "default.yaml"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    with config_path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+

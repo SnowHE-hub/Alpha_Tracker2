@@ -6,8 +6,8 @@ Usage:
   PYTHONPATH=src python -m alpha_tracker2.pipelines.smoke_e2e --start 2026-01-06 --end 2026-01-15 [--limit 5] [--topk 3]
   PYTHONPATH=src python -m alpha_tracker2.pipelines.smoke_e2e --date 2026-01-15 [--limit 5] [--topk 3]
 
-Steps (in order): ingest_universe → ingest_prices → build_features → score_all → eval_5d → portfolio_nav.
-Then checks: prices_daily, features_daily, picks_daily, eval_5d_daily, nav_daily exist with data and key columns non-null.
+Steps (in order): ingest_universe → ingest_prices → build_features → score_all → score_ensemble → eval_5d → portfolio_nav.
+Then checks: prices_daily, features_daily, picks_daily (incl. version='ENS'), eval_5d_daily, nav_daily exist with data and key columns non-null.
 Exits with code 0 on success, 1 on failure (with clear SMOKE FAIL message).
 
 Note: build_features needs enough price history (e.g. 260 trading days) for the target date. Use a --start/--end
@@ -139,6 +139,12 @@ def _run_checks(
             failures.append(
                 "SMOKE FAIL: picks_daily has 0 rows for V1/V2/V3/V4 on target date"
             )
+        r_ens = store.fetchone(
+            "SELECT COUNT(*) FROM picks_daily WHERE trade_date = ? AND version = 'ENS'",
+            [target_str],
+        )
+        if not r_ens or int(r_ens[0]) < 1:
+            failures.append("SMOKE FAIL: picks_daily has 0 rows for version='ENS' on target date")
         nulls = store.fetchone(
             """
             SELECT COUNT(*) FROM picks_daily
@@ -231,7 +237,7 @@ def main() -> int:
     start_str = start.isoformat()
     end_str = end.isoformat()
 
-    print("smoke_e2e: running 6 steps...")
+    print("smoke_e2e: running 7 steps (incl. score_ensemble)...")
     print(f"  project_root={project_root} store_db={settings.store_db}")
     print(f"  start={start_str} end={end_str} target_date={target_str} limit={args.limit} topk={args.topk}")
 
@@ -272,6 +278,7 @@ def main() -> int:
             ["--date", target_str, "--limit", str(args.limit)],
         )
         _run_step(project_root, "alpha_tracker2.pipelines.score_all", ["--date", target_str])
+        _run_step(project_root, "alpha_tracker2.pipelines.score_ensemble", ["--date", target_str])
         _run_step(project_root, "alpha_tracker2.pipelines.eval_5d", ["--date", target_str])
         _run_step(
             project_root,

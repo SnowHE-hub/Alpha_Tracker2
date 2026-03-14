@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS features_daily (
     -- Liquidity / amount
     avg_amount_20 DOUBLE,
 
+    -- Rolling backtest features (I-2 writes; V4 uses in S-2). All nullable.
+    bt_mean      DOUBLE,
+    bt_winrate   DOUBLE,
+    bt_worst_mdd DOUBLE,
+
     PRIMARY KEY (trade_date, ticker)
 );
 

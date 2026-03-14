@@ -50,10 +50,10 @@
   - 收益/动量：`ret_1d, ret_5d, ret_10d, ret_20d`
   - 波动与风险：`vol_5d, vol_ann_60d, mdd_60d`
   - 趋势与均线：`ma5, ma10, ma20, ma60, ma5_gt_ma10_gt_ma20, ma20_above_ma60, ma20_slope`
-  - 滚动回测：`bt_mean, bt_winrate, bt_worst_mdd, ...`（与选股设计文档 V2–V4 对齐）
+  - 滚动回测：`bt_mean`（DOUBLE，滚动窗口内模拟收益均值）、`bt_winrate`（DOUBLE，滚动窗口内胜率 [0,1]）、`bt_worst_mdd`（DOUBLE，滚动窗口内最差回撤，非正数或 NULL）；与选股设计文档 V2–V4 对齐
   - 量价流动性：`avg_amount_20` 等
 
-> 约定：`features_daily` 不直接写入模型版本信息。所有与“版本/策略”相关的信息，只出现在 `picks_daily` 等下游表中。
+> 约定：`features_daily` 不直接写入模型版本信息。所有与“版本/策略”相关的信息，只出现在 `picks_daily` 等下游表中。**bt_\*** 由 I-2 特征工程写入，V4 在 S-2 中接入。
 
 ### 3. `picks_daily`
 

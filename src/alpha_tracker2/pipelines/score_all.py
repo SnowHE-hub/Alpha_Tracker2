@@ -50,24 +50,45 @@ def _resolve_versions(arg_versions: str | None, project_root: Path) -> List[str]
     return list_versions()
 
 
-def _load_v2_v3_v4_config(project_root: Path) -> tuple[float, int, int]:
-    """Load scoring.v2_v3_v4.common (q, window, topk_fallback). Returns (q, window, topk_fallback)."""
+def _load_per_version_threshold_config(project_root: Path) -> dict[str, tuple[float, int, int]]:
+    """
+    Load per-version q, window, topk_fallback from scoring.v2_v3_v4.versions.<V2|V3|V4>
+    with fallback to common. Returns mapping version -> (q, window, topk_fallback).
+    """
     import yaml
 
     cfg_path = project_root / "configs" / "default.yaml"
-    q, window, topk_fallback = 0.8, 60, 50
+    default_q, default_window, default_topk = 0.8, 60, 50
+    common_q, common_window, common_topk = default_q, default_window, default_topk
+    versions_cfg: dict = {}
+
     if cfg_path.is_file():
         with cfg_path.open("r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
         v234 = (raw.get("scoring") or {}).get("v2_v3_v4") or {}
-        common = v234.get("common") or {}
-        if isinstance(common.get("q"), (int, float)):
-            q = float(common["q"])
-        if isinstance(common.get("window"), int):
-            window = common["window"]
-        if isinstance(common.get("topk_fallback"), int):
-            topk_fallback = common["topk_fallback"]
-    return (q, window, topk_fallback)
+        if isinstance(v234, dict):
+            common = v234.get("common") or {}
+            if isinstance(common, dict):
+                if isinstance(common.get("q"), (int, float)):
+                    common_q = float(common["q"])
+                if isinstance(common.get("window"), int):
+                    common_window = common["window"]
+                if isinstance(common.get("topk_fallback"), int):
+                    common_topk = common["topk_fallback"]
+            vers = v234.get("versions") or {}
+            if isinstance(vers, dict):
+                versions_cfg = vers
+
+    out: dict[str, tuple[float, int, int]] = {}
+    for ver in ("V2", "V3", "V4"):
+        v = versions_cfg.get(ver) or {}
+        if not isinstance(v, dict):
+            v = {}
+        q = float(v["q"]) if isinstance(v.get("q"), (int, float)) else common_q
+        window = int(v["window"]) if isinstance(v.get("window"), int) else common_window
+        topk = int(v["topk_fallback"]) if isinstance(v.get("topk_fallback"), int) else common_topk
+        out[ver] = (q, window, topk)
+    return out
 
 
 def _load_universe_names(store: DuckDBStore, trade_date: date) -> pd.DataFrame:
@@ -214,48 +235,44 @@ def _delete_existing_picks(
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Score all configured versions into picks_daily.")
-    parser.add_argument(
-        "--date",
-        type=str,
-        default=None,
-        help="Target trade date YYYY-MM-DD; default latest US trading day",
-    )
-    parser.add_argument(
-        "--versions",
-        type=str,
-        default=None,
-        help="Comma-separated score versions, e.g. V1,V2,V3,V4; "
-        "default from configs/default.yaml.scoring.score_versions",
-    )
-    args = parser.parse_args()
-
-    project_root = _find_project_root(Path(__file__).resolve())
-    settings = load_settings(project_root)
-    store = DuckDBStore(
-        db_path=settings.store_db,
-        schema_path=project_root / "src" / "alpha_tracker2" / "storage" / "schema.sql",
-    )
-    store.init_schema()
-    cal = TradingCalendar()
-
-    trade_date = _resolve_trade_date(args.date, cal)
-    versions = _resolve_versions(args.versions, project_root)
+def run(
+    project_root: Path,
+    trade_date: date,
+    versions: List[str] | None = None,
+    store: DuckDBStore | None = None,
+) -> None:
+    """
+    Run score_all for the given date and versions. Optional store for testing.
+    When store is None, create from settings(project_root).
+    """
+    if store is None:
+        settings = load_settings(project_root)
+        store = DuckDBStore(
+            db_path=settings.store_db,
+            schema_path=project_root / "src" / "alpha_tracker2" / "storage" / "schema.sql",
+        )
+        store.init_schema()
+    versions_list = _resolve_versions(None, project_root) if versions is None else versions
 
     universe_df = _load_universe_names(store, trade_date)
 
-    # Threshold and fallback from config (scoring.v2_v3_v4.common)
-    q, window, topk_fallback = _load_v2_v3_v4_config(project_root)
-    thr_cfg = ThresholdConfig(q=q, window=window)
+    # Per-version threshold config (S-3): V2/V3/V4 each get q, window, topk_fallback from config
+    per_version_thr = _load_per_version_threshold_config(project_root)
     thr_history_path = project_root / "data" / "cache" / "ab_threshold_history.json"
 
     # Idempotent delete per (trade_date, version)
-    _delete_existing_picks(store, trade_date, versions)
+    _delete_existing_picks(store, trade_date, versions_list)
 
-    for version in versions:
-        scorer = get_scorer(version)
+    for version in versions_list:
+        scorer = get_scorer(version, project_root)
         scores_df = scorer.score(trade_date, store)
+        # V1: no threshold; V2/V3/V4: per-version thr_cfg and fallback_topk
+        if version == "V1":
+            thr_cfg = ThresholdConfig(q=0.8, window=60)  # unused for V1
+            fallback_topk = 50
+        else:
+            q, window, fallback_topk = per_version_thr.get(version, (0.8, 60, 50))
+            thr_cfg = ThresholdConfig(q=q, window=window)
         rows = _prepare_rows_for_version(
             version=version,
             trade_date=trade_date,
@@ -263,7 +280,7 @@ def main() -> None:
             universe_df=universe_df,
             thr_cfg=thr_cfg,
             thr_history_path=thr_history_path,
-            fallback_topk=topk_fallback,
+            fallback_topk=fallback_topk,
         )
         if not rows:
             print(f"score_all: trade_date={trade_date} version={version}: no rows to write")
@@ -299,6 +316,37 @@ def main() -> None:
             thr_value = first[8]
             print(f"  threshold_value={thr_value}")
 
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Score all configured versions into picks_daily.")
+    parser.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        help="Target trade date YYYY-MM-DD; default latest US trading day",
+    )
+    parser.add_argument(
+        "--versions",
+        type=str,
+        default=None,
+        help="Comma-separated score versions, e.g. V1,V2,V3,V4; "
+        "default from configs/default.yaml.scoring.score_versions",
+    )
+    args = parser.parse_args()
+
+    project_root = _find_project_root(Path(__file__).resolve())
+    settings = load_settings(project_root)
+    store = DuckDBStore(
+        db_path=settings.store_db,
+        schema_path=project_root / "src" / "alpha_tracker2" / "storage" / "schema.sql",
+    )
+    store.init_schema()
+    cal = TradingCalendar()
+
+    trade_date = _resolve_trade_date(args.date, cal)
+    versions = _resolve_versions(args.versions, project_root)
+
+    run(project_root, trade_date, versions=versions, store=store)
     print(f"score_all: db={settings.store_db}")
 
 

@@ -23,12 +23,61 @@ data_sources:
   prices: "yahoo"
   universe: "static_index"
 
+# Feature computation (I-2: bt_* window; optional override)
+features:
+  bt_window: 60
+
+# E-2/E-3: batch range default, quintiles, IC (optional)
+evaluation:
+  batch_max_dates: 500
+  quintiles: 5
+  ic_method: "pearson"
+
 scoring:
   score_versions: ["V1", "V2", "V3", "V4"]
-  # V2/V3/V4 threshold and fallback (V1 has no threshold/fallback)
+  # S-4: ensemble input versions (score_ensemble reads these)
+  ensemble:
+    input_versions: ["V1", "V2", "V3", "V4"]
+
+  # V1: factor name -> weight (S-1 reads; optional per-factor override)
+  v1:
+    weights:
+      ret_5d: 0.5
+      ret_20d: 0.3
+      avg_amount_20: 0.2
+
+  # V2/V3/V4: common + per-version overrides (S-1/S-3 read q, window; S-2/S-4 read bt weights)
   v2_v3_v4:
     common:
       q: 0.8
       window: 60
       topk_fallback: 50
+    # Per-version overrides (optional; trend_weight, risk_weight, bt_weight, q, window, topk_fallback)
+    versions:
+      V2:
+        trend_weight: 0.4
+        risk_weight: 0.3
+        bt_weight: 0.0
+        q: 0.8
+        window: 60
+        topk_fallback: 50
+      V3:
+        trend_weight: 0.35
+        risk_weight: 0.35
+        bt_weight: 0.0
+        q: 0.7
+        window: 60
+        topk_fallback: 50
+      V4:
+        trend_weight: 0.3
+        risk_weight: 0.3
+        bt_weight: 0.4
+        q: 0.8
+        window: 60
+        topk_fallback: 50
+    # Weights for bt_* columns in V4 (or feature layer)
+    bt_column_weights:
+      bt_mean: 0.5
+      bt_winrate: 0.3
+      bt_worst_mdd: 0.2
 

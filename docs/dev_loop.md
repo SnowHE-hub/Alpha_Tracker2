@@ -70,4 +70,3 @@
 | 7 | dev 稳定后合并 main |
 
 **这两份文档（`docs/agent_workflow.md` + `docs/dev_loop.md`）构成后续所有 Agent 的“施工规范”，不得跳过或调乱顺序。**
-Codex review test

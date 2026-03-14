@@ -107,7 +107,7 @@ def _write_features(
     features_df = features_df.sort_index()
     trade_date_str = trade_date.isoformat()
 
-    # Prepare rows for insertion
+    # Prepare rows for insertion (include bt_* from I-2)
     cols = [
         "trade_date",
         "ticker",
@@ -126,6 +126,9 @@ def _write_features(
         "ma20_above_ma60",
         "ma20_slope",
         "avg_amount_20",
+        "bt_mean",
+        "bt_winrate",
+        "bt_worst_mdd",
     ]
 
     def _to_date(val) -> date:
@@ -139,29 +142,36 @@ def _write_features(
         if _to_date(ts) != trade_date:
             continue
         tickers.append(str(ticker))
+        def _f(key: str):
+            v = row.get(key)
+            return float(v) if pd.notna(v) else None
+
+        def _b(key: str):
+            v = row.get(key)
+            return bool(v) if pd.notna(v) else None
+
         records.append(
             (
                 trade_date_str,
                 str(ticker),
-                float(row.get("ret_1d")) if pd.notna(row.get("ret_1d")) else None,
-                float(row.get("ret_5d")) if pd.notna(row.get("ret_5d")) else None,
-                float(row.get("ret_10d")) if pd.notna(row.get("ret_10d")) else None,
-                float(row.get("ret_20d")) if pd.notna(row.get("ret_20d")) else None,
-                float(row.get("vol_5d")) if pd.notna(row.get("vol_5d")) else None,
-                float(row.get("vol_ann_60d")) if pd.notna(row.get("vol_ann_60d")) else None,
-                float(row.get("mdd_60d")) if pd.notna(row.get("mdd_60d")) else None,
-                float(row.get("ma5")) if pd.notna(row.get("ma5")) else None,
-                float(row.get("ma10")) if pd.notna(row.get("ma10")) else None,
-                float(row.get("ma20")) if pd.notna(row.get("ma20")) else None,
-                float(row.get("ma60")) if pd.notna(row.get("ma60")) else None,
-                bool(row.get("ma5_gt_ma10_gt_ma20"))
-                if pd.notna(row.get("ma5_gt_ma10_gt_ma20"))
-                else None,
-                bool(row.get("ma20_above_ma60"))
-                if pd.notna(row.get("ma20_above_ma60"))
-                else None,
-                float(row.get("ma20_slope")) if pd.notna(row.get("ma20_slope")) else None,
-                float(row.get("avg_amount_20")) if pd.notna(row.get("avg_amount_20")) else None,
+                _f("ret_1d"),
+                _f("ret_5d"),
+                _f("ret_10d"),
+                _f("ret_20d"),
+                _f("vol_5d"),
+                _f("vol_ann_60d"),
+                _f("mdd_60d"),
+                _f("ma5"),
+                _f("ma10"),
+                _f("ma20"),
+                _f("ma60"),
+                _b("ma5_gt_ma10_gt_ma20"),
+                _b("ma20_above_ma60"),
+                _f("ma20_slope"),
+                _f("avg_amount_20"),
+                _f("bt_mean"),
+                _f("bt_winrate"),
+                _f("bt_worst_mdd"),
             )
         )
 
@@ -187,13 +197,15 @@ def _write_features(
                 vol_5d, vol_ann_60d, mdd_60d,
                 ma5, ma10, ma20, ma60,
                 ma5_gt_ma10_gt_ma20, ma20_above_ma60, ma20_slope,
-                avg_amount_20
+                avg_amount_20,
+                bt_mean, bt_winrate, bt_worst_mdd
             ) VALUES (
                 ?, ?, ?, ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
-                ?
+                ?,
+                ?, ?, ?
             )""",
             records,
         )

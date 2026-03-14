@@ -1,11 +1,15 @@
 """
 Dashboard data aggregation: load nav_daily, eval_5d_daily, picks_daily from store
 for a date range. Used by make_dashboard and can be reused by Streamlit etc.
+
+Extended (D-1): build_eval_summary aggregates eval_5d_daily + ic_series.csv into
+eval_summary.csv columns: version, mean_fwd_ret_5d, mean_ic, n_dates.
 """
 
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -83,3 +87,53 @@ def load_picks_for_dashboard(
     if not rows:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(rows, columns=cols)
+
+
+def build_eval_summary(
+    store: "DuckDBStore",
+    start: date,
+    end: date,
+    ic_series_csv_path: Path | None = None,
+) -> pd.DataFrame:
+    """
+    Build eval_summary DataFrame for [start, end]: version, mean_fwd_ret_5d, mean_ic, n_dates.
+
+    - mean_fwd_ret_5d, n_dates: from eval_5d_daily (bucket='all') aggregated by version.
+    - mean_ic: from ic_series CSV if path exists and is readable; else None for that column.
+
+    Output columns: version, mean_fwd_ret_5d, mean_ic, n_dates.
+    """
+    start_str = start.isoformat()
+    end_str = end.isoformat()
+    rows = store.fetchall(
+        """
+        SELECT version,
+               AVG(fwd_ret_5d) AS mean_fwd_ret_5d,
+               COUNT(DISTINCT as_of_date) AS n_dates
+        FROM eval_5d_daily
+        WHERE as_of_date >= ? AND as_of_date <= ?
+          AND bucket = 'all'
+        GROUP BY version
+        """,
+        [start_str, end_str],
+    )
+    if not rows:
+        df = pd.DataFrame(columns=["version", "mean_fwd_ret_5d", "mean_ic", "n_dates"])
+    else:
+        df = pd.DataFrame(rows, columns=["version", "mean_fwd_ret_5d", "n_dates"])
+        df["mean_ic"] = None
+
+    if ic_series_csv_path is not None and ic_series_csv_path.is_file():
+        try:
+            ic_df = pd.read_csv(ic_series_csv_path)
+            if not ic_df.empty and "version" in ic_df.columns and "ic" in ic_df.columns:
+                ic_df["as_of_date"] = ic_df["as_of_date"].astype(str)
+                ic_in_range = ic_df[
+                    (ic_df["as_of_date"] >= start_str) & (ic_df["as_of_date"] <= end_str)
+                ]
+                mean_ic = ic_in_range.groupby("version")["ic"].mean().reindex(df["version"])
+                df["mean_ic"] = mean_ic.values
+        except Exception:
+            pass
+
+    return df

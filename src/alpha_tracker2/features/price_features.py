@@ -12,6 +12,9 @@ import pandas as pd
 class PriceFeatureConfig:
     """
     Configuration for price feature computation windows.
+
+    bt_window: rolling window for backtest-style features (bt_mean, bt_winrate, bt_worst_mdd).
+    Aligned with vol_long_window (60) by default; can be overridden via config.
     """
 
     ret_windows: Sequence[int] = (1, 5, 10, 20)
@@ -21,6 +24,7 @@ class PriceFeatureConfig:
     amount_window: int = 20
     ma_slope_window: int = 20
     annualization_factor: float = 252.0
+    bt_window: int = 60
 
 
 def _ensure_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -71,16 +75,18 @@ def _rolling_volatility(
     return vol
 
 
-def _rolling_max_drawdown(prices: pd.Series, window: int) -> pd.Series:
+def _rolling_max_drawdown(
+    prices: pd.Series,
+    window: int,
+    min_periods: int = 1,
+) -> pd.Series:
     """
-    Rolling max drawdown over a trailing window in terms of price / rolling peak.
+    Rolling max drawdown over a trailing window: (price / running_max - 1).min(), non-positive.
     """
-    # Work with a rolling window via expanding then differencing cumulative max.
     rolling_mdd = pd.Series(index=prices.index, dtype="float64")
-    # For simplicity and clarity we use a groupby-style apply on a rolling object
-    roll = prices.rolling(window=window, min_periods=1)
+    roll = prices.rolling(window=window, min_periods=min_periods)
     rolling_mdd[:] = roll.apply(
-        lambda x: float((x / x.cummax() - 1.0).min()),
+        lambda x: float((x / x.cummax() - 1.0).min()) if len(x) >= min_periods else float("nan"),
         raw=False,
     )
     return rolling_mdd
@@ -189,6 +195,18 @@ def compute_price_features(
         # Max drawdown on price
         mdd_60d = _rolling_max_drawdown(prices, window=config.vol_long_window)
 
+        # Backtest-style rolling features (I-2): same window as mdd by default (bt_window).
+        # bt_mean: mean of daily returns in window (simulated rolling return); NULL if insufficient data.
+        # bt_winrate: fraction of days with ret_1d > 0 in [0, 1]; NULL if no valid returns.
+        # bt_worst_mdd: max drawdown in window (price / cummax - 1).min(), <= 0; NULL if cannot compute.
+        bt_window = config.bt_window
+        min_periods_bt = min(5, bt_window)
+        bt_mean = ret_1d.rolling(window=bt_window, min_periods=min_periods_bt).mean()
+        bt_winrate = (ret_1d > 0).astype("float64").rolling(
+            window=bt_window, min_periods=min_periods_bt
+        ).mean()
+        bt_worst_mdd = _rolling_max_drawdown(prices, window=bt_window, min_periods=2)
+
         # Moving averages
         ma_cols: dict[str, pd.Series] = {}
         for w in config.ma_windows:
@@ -228,6 +246,9 @@ def compute_price_features(
                 "ma20_above_ma60": ma20_above_ma60.astype("boolean"),
                 "ma20_slope": ma20_slope,
                 "avg_amount_20": avg_amount_20,
+                "bt_mean": bt_mean,
+                "bt_winrate": bt_winrate,
+                "bt_worst_mdd": bt_worst_mdd,
             },
             index=g.index,
         )
@@ -251,6 +272,9 @@ def compute_price_features(
                 "ma20_above_ma60",
                 "ma20_slope",
                 "avg_amount_20",
+                "bt_mean",
+                "bt_winrate",
+                "bt_worst_mdd",
             ]
         )
 
