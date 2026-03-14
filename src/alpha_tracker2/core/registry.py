@@ -1,26 +1,32 @@
+"""
+Registry for ingestion providers (and later scoring/strategies).
+
+This module holds only provider registration for ingestion.
+Other agents will extend registry for scorers and strategies.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Type
+from alpha_tracker2.ingestion.base import PriceProvider, UniverseProvider
+from alpha_tracker2.ingestion.plugins.yahoo_price_provider import YahooPriceProvider
+from alpha_tracker2.ingestion.plugins.yahoo_universe import YahooUniverseProvider
 
-from alpha_tracker2.ingestion.base import UniverseProvider
-from alpha_tracker2.ingestion.prices_base import PriceProvider
+UNIVERSE_PROVIDERS: dict[str, type[UniverseProvider]] = {
+    "yahoo_universe": YahooUniverseProvider,
+}
 
-
-@dataclass
-class Registry:
-    universe_providers: Dict[str, Type[UniverseProvider]]
-    prices_providers: Dict[str, Type[PriceProvider]]
-
-    def get_universe_provider(self, name: str) -> Type[UniverseProvider]:
-        if name not in self.universe_providers:
-            raise KeyError(f"Unknown universe provider: {name}")
-        return self.universe_providers[name]
-
-    def get_prices_provider(self, name: str) -> Type[PriceProvider]:
-        if name not in self.prices_providers:
-            raise KeyError(f"Unknown prices provider: {name}")
-        return self.prices_providers[name]
+PRICE_PROVIDERS: dict[str, type[PriceProvider]] = {
+    "yahoo_prices": YahooPriceProvider,
+}
 
 
-REGISTRY = Registry(universe_providers={}, prices_providers={})
+def get_universe_provider(name: str) -> type[UniverseProvider]:
+    if name not in UNIVERSE_PROVIDERS:
+        raise KeyError(f"Unknown universe provider: {name!r}. Known: {list(UNIVERSE_PROVIDERS)}")
+    return UNIVERSE_PROVIDERS[name]
+
+
+def get_price_provider(name: str) -> type[PriceProvider]:
+    if name not in PRICE_PROVIDERS:
+        raise KeyError(f"Unknown price provider: {name!r}. Known: {list(PRICE_PROVIDERS)}")
+    return PRICE_PROVIDERS[name]

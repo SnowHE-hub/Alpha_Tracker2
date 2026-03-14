@@ -1,313 +1,181 @@
+"""
+Evaluate picks by forward N-day return and write results to eval_5d_daily.
+"""
+
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, timedelta
+from datetime import date
 from pathlib import Path
+from typing import List, Tuple
+
+import yaml
 
 import pandas as pd
 
 from alpha_tracker2.core.config import load_settings
+from alpha_tracker2.core.trading_calendar import TradingCalendar
+from alpha_tracker2.evaluation.forward_returns import compute_forward_returns
 from alpha_tracker2.storage.duckdb_store import DuckDBStore
 
 
-ROOT = Path(__file__).resolve().parents[3]
+def _find_project_root(start: Path) -> Path:
+    current = start
+    for parent in [current, *current.parents]:
+        if (parent / "configs" / "default.yaml").is_file():
+            return parent
+    raise RuntimeError("Could not locate project root containing configs/default.yaml")
 
 
-def _parse_args():
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--asof",
-        default=None,
-        help="as-of date YYYY-MM-DD (default: latest trading day from prices_daily). "
-             "Evaluation uses picks at (asof - horizon trading days).",
-    )
-    ap.add_argument("--horizon", type=int, default=5, help="forward trading days horizon, default=5")
-    ap.add_argument("--versions", default="V1,V2,V3,V4", help="comma separated versions")
-    ap.add_argument("--topk", type=int, default=None, help="optional: only evaluate top-k picks per version")
-    return ap.parse_args()
+def _resolve_as_of_date(arg_date: str | None, cal: TradingCalendar) -> date:
+    if arg_date:
+        return date.fromisoformat(arg_date)
+    return cal.latest_trading_day("US")
 
 
-def _to_date(s: str) -> date:
-    return datetime.strptime(s, "%Y-%m-%d").date()
+def _resolve_versions(arg_versions: str | None, project_root: Path) -> List[str]:
+    if arg_versions:
+        return [v.strip().upper() for v in arg_versions.split(",") if v.strip()]
+    cfg_path = project_root / "configs" / "default.yaml"
+    if cfg_path.is_file():
+        with cfg_path.open("r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        scoring_cfg = raw.get("scoring") or {}
+        versions = scoring_cfg.get("score_versions")
+        if isinstance(versions, list) and versions:
+            return [str(v).upper() for v in versions]
+    return ["V1", "V2", "V3", "V4"]
 
 
-def _fetch_trading_days(store: DuckDBStore, start: date, end: date) -> list[date]:
-    sql = """
-    SELECT DISTINCT trade_date
-    FROM prices_daily
-    WHERE trade_date BETWEEN ? AND ?
-    ORDER BY trade_date
-    """
-    rows = store.fetchall(sql, (start, end))
-    return [r[0] for r in rows]
+# Buckets: (bucket_name, rank_max inclusive; None = all)
+BUCKETS: List[Tuple[str, int | None]] = [
+    ("all", None),
+    ("top3", 3),
+    ("top5", 5),
+]
 
 
-def _latest_trading_day(store: DuckDBStore) -> date:
-    sql = "SELECT MAX(trade_date) FROM prices_daily"
-    rows = store.fetchall(sql, ())
-    if not rows or rows[0][0] is None:
-        raise RuntimeError("prices_daily is empty; cannot determine latest trading day.")
-    return rows[0][0]
-
-
-def _offset_trading_day(days: list[date], d: date, offset: int) -> date | None:
-    """
-    offset < 0 : previous trading day(s)
-    offset > 0 : next trading day(s)
-    """
-    if d not in days:
-        return None
-    i = days.index(d)
-    j = i + offset
-    if j < 0 or j >= len(days):
-        return None
-    return days[j]
-
-
-def _fetch_picks(store: DuckDBStore, picks_date: date, versions: list[str], topk: int | None) -> pd.DataFrame:
-    placeholders = ",".join(["?"] * len(versions))
-    sql = f"""
-        SELECT trade_date, version, ticker, name, rank, score, reason
+def _load_picks_for_version(
+    store: DuckDBStore,
+    as_of_date: date,
+    version: str,
+) -> pd.DataFrame:
+    """Load picks_daily for given date and version with ticker and rank. Sorted by rank."""
+    rows = store.fetchall(
+        """
+        SELECT ticker, rank
         FROM picks_daily
-        WHERE trade_date = ?
-          AND version IN ({placeholders})
-        ORDER BY version, rank
-    """
-    rows = store.fetchall(sql, tuple([picks_date] + versions))
-    df = pd.DataFrame(rows, columns=["trade_date", "version", "ticker", "name", "rank", "score", "reason"])
-
-    if topk is not None and not df.empty:
-        df = df[df["rank"].notna()].copy()
-        df["rank"] = df["rank"].astype(int)
-        df = df[df["rank"] <= int(topk)].copy()
-
+        WHERE trade_date = ? AND version = ?
+        ORDER BY rank ASC NULLS LAST
+        """,
+        [as_of_date.isoformat(), version],
+    )
+    if not rows:
+        return pd.DataFrame(columns=["ticker", "rank"])
+    df = pd.DataFrame(rows, columns=["ticker", "rank"])
+    df["ticker"] = df["ticker"].astype(str)
+    df["rank"] = pd.to_numeric(df["rank"], errors="coerce")
     return df
 
 
-def _fetch_close(store: DuckDBStore, d: date, tickers: list[str]) -> pd.DataFrame:
-    if not tickers:
-        return pd.DataFrame(columns=["trade_date", "ticker", "close"])
-    placeholders = ",".join(["?"] * len(tickers))
-    sql = f"""
-        SELECT trade_date, ticker, close
-        FROM prices_daily
-        WHERE trade_date = ?
-          AND ticker IN ({placeholders})
-    """
-    params = (d, *tickers)
-    rows = store.fetchall(sql, params)
-    if not rows:
-        return pd.DataFrame(columns=["trade_date", "ticker", "close"])
-    return pd.DataFrame(rows, columns=["trade_date", "ticker", "close"])
+def _tickers_for_bucket(picks_df: pd.DataFrame, bucket: str, rank_max: int | None) -> List[str]:
+    if picks_df.empty:
+        return []
+    if rank_max is None:
+        return picks_df["ticker"].tolist()
+    sub = picks_df[picks_df["rank"] <= rank_max]
+    return sub["ticker"].tolist()
 
 
-def _calc_detail(
-    picks: pd.DataFrame,
-    px0: pd.DataFrame,
-    px1: pd.DataFrame,
-    asof_date: date,
-    picks_trade_date: date,
-    horizon: int,
-) -> pd.DataFrame:
-    if picks.empty:
-        return pd.DataFrame(
-            columns=[
-                "trade_date", "version", "ticker", "name", "rank", "score", "reason",
-                "asof_date", "horizon", "picks_trade_date", "n_picks", "n_valid",
-                "close_0", "close_1", "ret_h", "ret_5d",
-            ]
-        )
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Evaluate picks by forward N-day return and write eval_5d_daily.",
+    )
+    parser.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        help="As-of date YYYY-MM-DD; default latest US trading day",
+    )
+    parser.add_argument(
+        "--versions",
+        type=str,
+        default=None,
+        help="Comma-separated versions e.g. V1,V2,V3,V4; default from config",
+    )
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=5,
+        help="Forward return horizon in trading days (default 5)",
+    )
+    args = parser.parse_args()
 
-    d0 = px0.rename(columns={"close": "close_0"})
-    d1 = px1.rename(columns={"close": "close_1"})
-
-    out = picks.copy()
-    out["ticker"] = out["ticker"].astype(str)
-
-    out = out.merge(d0[["ticker", "close_0"]], on="ticker", how="left")
-    out = out.merge(d1[["ticker", "close_1"]], on="ticker", how="left")
-
-    out["asof_date"] = asof_date
-    out["horizon"] = int(horizon)
-    out["picks_trade_date"] = picks_trade_date
-
-    out["ret_h"] = (out["close_1"] / out["close_0"]) - 1.0
-    # 兼容字段：上游/旧逻辑常用 ret_5d
-    out["ret_5d"] = out["ret_h"] if int(horizon) == 5 else out["ret_h"]
-
-    # 只算有效行
-    out = out.dropna(subset=["close_0", "close_1", "ret_h"]).reset_index(drop=True)
-
-    # 每行都带 n_picks/n_valid（按 version）
-    n_picks_map = picks.groupby("version", dropna=False).size().to_dict()
-    n_valid_map = out.groupby("version", dropna=False).size().to_dict()
-    out["n_picks"] = out["version"].map(lambda v: int(n_picks_map.get(v, 0)))
-    out["n_valid"] = out["version"].map(lambda v: int(n_valid_map.get(v, 0)))
-
-    return out
-
-
-def _summary(detail: pd.DataFrame, asof_date: date, picks_trade_date: date, horizon: int, picks_all: pd.DataFrame) -> pd.DataFrame:
-    cols = [
-        "asof_date",
-        "horizon",
-        "picks_trade_date",
-        "version",
-        "n_picks",
-        "n_valid",
-        "ret_h_mean",
-        "ret_h_median",
-        "hit_rate_h",
-        "top1_ret_h",
-    ]
-
-    if picks_all is None or picks_all.empty:
-        return pd.DataFrame(columns=cols)
-
-    n_picks_map = picks_all.groupby("version", dropna=False).size().to_dict()
-
-    if detail is None or detail.empty:
-        # 仍然输出每个 version 一行，n_valid=0
-        rows = []
-        for v in sorted(picks_all["version"].dropna().unique().tolist()):
-            rows.append(
-                {
-                    "asof_date": asof_date,
-                    "horizon": int(horizon),
-                    "picks_trade_date": picks_trade_date,
-                    "version": v,
-                    "n_picks": int(n_picks_map.get(v, 0)),
-                    "n_valid": 0,
-                    "ret_h_mean": float("nan"),
-                    "ret_h_median": float("nan"),
-                    "hit_rate_h": float("nan"),
-                    "top1_ret_h": float("nan"),
-                }
-            )
-        return pd.DataFrame(rows)[cols]
-
-    def hit_rate(s: pd.Series) -> float:
-        s = s.dropna()
-        if len(s) == 0:
-            return float("nan")
-        return float((s > 0).mean())
-
-    rows = []
-    for v, d in detail.groupby("version", dropna=False):
-        r = d["ret_h"].dropna()
-        # top1：按 rank 最小的那只
-        top1 = float("nan")
-        if "rank" in d.columns and not d.empty:
-            dd = d.sort_values("rank", na_position="last").head(1)
-            if not dd.empty and pd.notna(dd["ret_h"].iloc[0]):
-                top1 = float(dd["ret_h"].iloc[0])
-
-        rows.append(
-            {
-                "asof_date": asof_date,
-                "horizon": int(horizon),
-                "picks_trade_date": picks_trade_date,
-                "version": v,
-                "n_picks": int(n_picks_map.get(v, 0)),
-                "n_valid": int(len(r)),
-                "ret_h_mean": float(r.mean()) if len(r) else float("nan"),
-                "ret_h_median": float(r.median()) if len(r) else float("nan"),
-                "hit_rate_h": hit_rate(d["ret_h"]),
-                "top1_ret_h": top1,
-            }
-        )
-
-    # 把“有 picks 但全无效”的版本也补齐
-    picked_versions = set(picks_all["version"].dropna().unique().tolist())
-    seen = set([x["version"] for x in rows])
-    for v in sorted(picked_versions - seen):
-        rows.append(
-            {
-                "asof_date": asof_date,
-                "horizon": int(horizon),
-                "picks_trade_date": picks_trade_date,
-                "version": v,
-                "n_picks": int(n_picks_map.get(v, 0)),
-                "n_valid": 0,
-                "ret_h_mean": float("nan"),
-                "ret_h_median": float("nan"),
-                "hit_rate_h": float("nan"),
-                "top1_ret_h": float("nan"),
-            }
-        )
-
-    return pd.DataFrame(rows)[cols].sort_values("version").reset_index(drop=True)
-
-
-def main():
-    args = _parse_args()
-
-    cfg = load_settings(ROOT)
+    project_root = _find_project_root(Path(__file__).resolve())
+    settings = load_settings(project_root)
     store = DuckDBStore(
-        db_path=cfg.store_db,
-        schema_path=ROOT / "src" / "alpha_tracker2" / "storage" / "schema.sql",
+        db_path=settings.store_db,
+        schema_path=project_root / "src" / "alpha_tracker2" / "storage" / "schema.sql",
+    )
+    store.init_schema()
+    cal = TradingCalendar()
+
+    as_of_date = _resolve_as_of_date(args.date, cal)
+    versions = _resolve_versions(args.versions, project_root)
+
+    # Idempotent: delete existing rows for this as_of_date
+    store.exec(
+        "DELETE FROM eval_5d_daily WHERE as_of_date = ?",
+        [as_of_date.isoformat()],
     )
 
-    horizon = max(1, int(args.horizon))
-    versions = [v.strip() for v in args.versions.split(",") if v.strip()]
+    as_of_str = as_of_date.isoformat()
+    rows_to_insert: List[tuple] = []
 
-    # asof 默认取 prices_daily 最新交易日
-    asof_date = _to_date(args.asof) if args.asof else _latest_trading_day(store)
+    for version in versions:
+        picks_df = _load_picks_for_version(store, as_of_date, version)
+        if picks_df.empty:
+            for bucket_name, _ in BUCKETS:
+                rows_to_insert.append((as_of_str, version, bucket_name, None, 0, args.horizon))
+            print(f"eval_5d: as_of_date={as_of_date} version={version} no picks, writing placeholder rows")
+            continue
 
-    # trading days：向前取足够 buffer（避免 horizon 不够）
-    buf_start = asof_date - timedelta(days=180)
-    trading_days = _fetch_trading_days(store, buf_start, asof_date)
+        for bucket_name, rank_max in BUCKETS:
+            tickers = _tickers_for_bucket(picks_df, bucket_name, rank_max)
+            if not tickers:
+                rows_to_insert.append((as_of_str, version, bucket_name, None, 0, args.horizon))
+                continue
 
-    if asof_date not in trading_days:
-        raise RuntimeError(f"asof_date {asof_date} not found in prices_daily trading calendar.")
+            fr_df = compute_forward_returns(store, as_of_date, tickers, horizon=args.horizon)
+            if fr_df.empty:
+                fwd_ret_5d = None
+                n_picks = len(tickers)
+            else:
+                valid = fr_df["fwd_ret"].notna()
+                n_valid = valid.sum()
+                if n_valid == 0:
+                    fwd_ret_5d = None
+                else:
+                    fwd_ret_5d = float(fr_df.loc[valid, "fwd_ret"].mean())
+                n_picks = len(tickers)
 
-    picks_trade_date = _offset_trading_day(trading_days, asof_date, offset=-horizon)
-    if picks_trade_date is None:
-        raise RuntimeError(f"Not enough trading-day history before {asof_date} for horizon={horizon}.")
+            rows_to_insert.append((as_of_str, version, bucket_name, fwd_ret_5d, n_picks, args.horizon))
+            print(f"eval_5d: as_of_date={as_of_date} version={version} bucket={bucket_name} fwd_ret_5d={fwd_ret_5d} n_picks={n_picks}")
 
-    print("[OK] eval_5d started.")
-    print("asof_date:", asof_date.isoformat())
-    print("horizon:", horizon)
-    print("picks_trade_date:", picks_trade_date.isoformat(), f"(asof - {horizon} trading days)")
-    print("versions:", versions)
-    print("topk:", args.topk)
+    if rows_to_insert:
+        with store.session() as conn:
+            conn.executemany(
+                """
+                INSERT INTO eval_5d_daily (as_of_date, version, bucket, fwd_ret_5d, n_picks, horizon)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows_to_insert,
+            )
+        print(f"eval_5d: as_of_date={as_of_date} wrote_rows={len(rows_to_insert)}")
+    else:
+        print("eval_5d: no rows to write")
 
-    picks = _fetch_picks(store, picks_trade_date, versions, topk=args.topk)
-    print("picks_rows:", len(picks))
-
-    tickers = sorted(picks["ticker"].astype(str).unique().tolist()) if not picks.empty else []
-    px0 = _fetch_close(store, picks_trade_date, tickers)
-    px1 = _fetch_close(store, asof_date, tickers)
-
-    detail = _calc_detail(
-        picks=picks,
-        px0=px0,
-        px1=px1,
-        asof_date=asof_date,
-        picks_trade_date=picks_trade_date,
-        horizon=horizon,
-    )
-    summary = _summary(
-        detail=detail,
-        asof_date=asof_date,
-        picks_trade_date=picks_trade_date,
-        horizon=horizon,
-        picks_all=picks,
-    )
-
-    out_dir = ROOT / "data" / "out"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 注意：这里是 “asof 单次评估”，文件名用 asof 防止歧义
-    out_detail = out_dir / f"model_eval_{horizon}d_asof_{asof_date.isoformat()}.csv"
-    out_sum = out_dir / f"model_eval_{horizon}d_asof_summary_{asof_date.isoformat()}.csv"
-
-    detail.to_csv(out_detail, index=False, encoding="utf-8-sig")
-    summary.to_csv(out_sum, index=False, encoding="utf-8-sig")
-
-    print("[OK] eval_5d passed.")
-    print("detail:", str(out_detail))
-    print("summary:", str(out_sum))
+    print(f"eval_5d: db={settings.store_db}")
 
 
 if __name__ == "__main__":

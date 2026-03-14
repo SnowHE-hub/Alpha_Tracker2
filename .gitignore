@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Cursor
+.cursor/
+
+# OS / editor
+.DS_Store
+.vscode/
+
+# Runtime data
+data/store/
+data/lake/
+data/out/
+*.duckdb
+*.parquet
+*.csv
+*.log

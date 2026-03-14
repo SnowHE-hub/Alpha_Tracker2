@@ -1,0 +1,8 @@
+# Core (used by smoke, config, storage)
+duckdb>=0.9.0
+PyYAML>=6.0
+pandas>=2.0.0
+
+# Ingestion: Yahoo prices and lake cache
+yfinance>=0.2.0
+pyarrow>=14.0.0

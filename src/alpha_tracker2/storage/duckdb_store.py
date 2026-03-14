@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterator, Optional, Sequence
+
 import duckdb
-from contextlib import contextmanager
+
 
 @dataclass(frozen=True)
 class DuckDBStore:
@@ -12,61 +14,73 @@ class DuckDBStore:
     schema_path: Path
 
     def connect(self) -> duckdb.DuckDBPyConnection:
+        """
+        Create a new DuckDB connection to the configured database path.
+
+        Ensures the parent directory for the database file exists.
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         return duckdb.connect(str(self.db_path))
 
+    def init_schema(self) -> None:
+        """
+        Initialize the database schema from the schema.sql file.
+
+        The SQL file may contain multiple statements.
+        """
+        if not self.schema_path.is_file():
+            raise FileNotFoundError(f"Schema file not found: {self.schema_path}")
+
+        sql = self.schema_path.read_text(encoding="utf-8")
+        with self.session() as conn:
+            # DuckDB can execute multiple statements in a single execute call.
+            conn.execute(sql)
+
+    def exec(self, sql: str, params: Optional[Sequence[object]] = None) -> None:
+        """
+        Execute a SQL statement that does not return rows.
+        """
+        with self.session() as conn:
+            if params is not None:
+                conn.execute(sql, params)
+            else:
+                conn.execute(sql)
+
+    def fetchall(
+        self, sql: str, params: Optional[Sequence[object]] = None
+    ) -> list[tuple]:
+        """
+        Execute a query and return all rows as a list of tuples.
+        """
+        with self.session() as conn:
+            if params is not None:
+                result = conn.execute(sql, params)
+            else:
+                result = conn.execute(sql)
+            return result.fetchall()
+
+    def fetchone(
+        self, sql: str, params: Optional[Sequence[object]] = None
+    ) -> Optional[tuple]:
+        """
+        Execute a query and return the first row, or None if there is no result.
+        """
+        with self.session() as conn:
+            if params is not None:
+                result = conn.execute(sql, params)
+            else:
+                result = conn.execute(sql)
+            row = result.fetchone()
+            return row if row is not None else None
 
     @contextmanager
-    def session(self):
+    def session(self) -> Iterator[duckdb.DuckDBPyConnection]:
         """
-        提供一个“保持连接不关闭”的会话，用于事务/批量写入。
-        用法：
-          with store.session() as con:
-              con.execute("BEGIN;")
-              ...
+        Context manager that yields a DuckDB connection and closes it on exit.
         """
-        con = self.connect()
+        conn = self.connect()
         try:
-            yield con
+            yield conn
         finally:
-            con.close()
+            conn.close()
 
-    def init_schema(self) -> None:
-        if not self.schema_path.exists():
-            raise FileNotFoundError(f"Missing schema file: {self.schema_path}")
-
-        con = self.connect()
-        try:
-            sql = self.schema_path.read_text(encoding="utf-8")
-            con.execute(sql)
-        finally:
-            con.close()
-
-    # ✅ 新增：执行但不返回结果集（适合 INSERT/CREATE）
-    def exec(self, sql: str, params: tuple | None = None) -> None:
-        con = self.connect()
-        try:
-            if params is None:
-                con.execute(sql)
-            else:
-                con.execute(sql, params)
-        finally:
-            con.close()
-
-    # ✅ 新增：查询返回所有行（在 close 前 fetch 完）
-    def fetchall(self, sql: str, params: tuple | None = None) -> list[tuple]:
-        con = self.connect()
-        try:
-            rel = con.execute(sql) if params is None else con.execute(sql, params)
-            return rel.fetchall()
-        finally:
-            con.close()
-
-    # ✅ 新增：查询返回单行（在 close 前 fetch 完）
-    def fetchone(self, sql: str, params: tuple | None = None) -> tuple | None:
-        con = self.connect()
-        try:
-            rel = con.execute(sql) if params is None else con.execute(sql, params)
-            return rel.fetchone()
-        finally:
-            con.close()

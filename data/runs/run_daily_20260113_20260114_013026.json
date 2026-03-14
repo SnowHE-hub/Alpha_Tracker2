@@ -1,0 +1,19 @@
+{
+  "run_id": "run_daily_20260113_20260114_013026",
+  "date": null,
+  "start": "2026-01-13",
+  "end": "2026-01-14",
+  "single_date": "2026-01-14",
+  "skips": {
+    "ingest_universe": false,
+    "prices": false,
+    "features": false,
+    "score": false,
+    "eval": false,
+    "nav": false,
+    "dashboard": false
+  },
+  "limit": null,
+  "topk": null,
+  "last_n": null
+}

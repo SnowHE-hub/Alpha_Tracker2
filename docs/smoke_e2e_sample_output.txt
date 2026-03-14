@@ -1,0 +1,70 @@
+Sample successful run of smoke_e2e (Task 4 acceptance).
+
+--- Cold run (当日首次 build_features) 复现 ---
+1) 清空目标日 features / picks(V1-V4) / eval（可选：清空该区间 nav）
+   PYTHONPATH=src python -c "
+   from pathlib import Path
+   from alpha_tracker2.core.config import load_settings
+   from alpha_tracker2.storage.duckdb_store import DuckDBStore
+   root = next(p for p in [Path('.').resolve(), *Path('.').resolve().parents] if (p / 'configs' / 'default.yaml').is_file())
+   s = load_settings(root)
+   store = DuckDBStore(s.store_db, root / 'src/alpha_tracker2/storage/schema.sql')
+   for d in ['2025-03-12']:
+       store.exec('DELETE FROM features_daily WHERE trade_date = ?', [d])
+       store.exec('''DELETE FROM picks_daily WHERE trade_date = ? AND version IN ('V1','V2','V3','V4')''', [d])
+       store.exec('DELETE FROM eval_5d_daily WHERE as_of_date = ?', [d])
+   print('Cleared.')
+   "
+2) 执行 smoke（会按 prices_daily 实际最大 trade_date 解析目标日，保证 build_features 有数据）
+   PYTHONPATH=src python -m alpha_tracker2.pipelines.smoke_e2e --start 2024-01-01 --end 2025-03-13 --limit 5 --topk 3
+
+--- 原示例命令（若 prices 已覆盖 end 日）---
+Command (from repo root):
+  PYTHONPATH=src python -m alpha_tracker2.pipelines.smoke_e2e --start 2024-01-01 --end 2026-01-14 --limit 5 --topk 3
+
+Output:
+--------
+ingest_universe: wrote 3 rows
+  trade_date=2026-01-14
+  db=/home/lenovo/projects/alpha_tracker2_clean/data/store/alpha_tracker.duckdb
+  provider=yahoo_universe
+  0700.HK: 500 rows, source=live, [2024-01-01, 2026-01-14]
+  AAPL: 510 rows, source=live, [2024-01-01, 2026-01-14]
+  MSFT: 510 rows, source=live, [2024-01-01, 2026-01-14]
+ingest_prices: total 1520 rows
+  db=/home/lenovo/projects/alpha_tracker2_clean/data/store/alpha_tracker.duckdb
+build_features: trade_date=2026-01-14, tickers=3
+  window=[2025-01-16, 2026-01-14] trading_days=260
+  wrote_rows=0
+  db=/home/lenovo/projects/alpha_tracker2_clean/data/store/alpha_tracker.duckdb
+score_all: trade_date=2026-01-14 version=V1 wrote_rows=3 thr_cfg(q=0.8, window=60)
+score_all: trade_date=2026-01-14 version=V2 wrote_rows=3 thr_cfg(q=0.8, window=60)
+  threshold_value=0.6364584840944588
+score_all: trade_date=2026-01-14 version=V3 wrote_rows=3 thr_cfg(q=0.8, window=60)
+  threshold_value=0.7733968028714953
+score_all: trade_date=2026-01-14 version=V4 wrote_rows=3 thr_cfg(q=0.8, window=60)
+  threshold_value=0.6511800809018391
+score_all: db=/home/lenovo/projects/alpha_tracker2_clean/data/store/alpha_tracker.duckdb
+eval_5d: as_of_date=2026-01-14 version=V1 bucket=all fwd_ret_5d=None n_picks=3
+...
+eval_5d: as_of_date=2026-01-14 wrote_rows=12
+eval_5d: db=/home/lenovo/projects/alpha_tracker2_clean/data/store/alpha_tracker.duckdb
+portfolio_nav: start=2024-01-01 end=2026-01-14 versions=['V1', 'V2', 'V3', 'V4'] topk=3 wrote_rows=2132
+portfolio_nav: db=/home/lenovo/projects/alpha_tracker2_clean/data/store/alpha_tracker.duckdb
+smoke_e2e: running 6 steps...
+  project_root=... store_db=...
+  start=2024-01-01 end=2026-01-14 target_date=2026-01-14 limit=5 topk=3
+smoke_e2e: running table checks...
+smoke_e2e: all steps and checks passed.
+
+Conclusion: All five tables (prices_daily, features_daily, picks_daily, eval_5d_daily, nav_daily) have data;
+row counts and key-column non-null checks passed. Exit code 0.
+
+--- Cold-run sample (resolved target_date) ---
+When end date is not yet in prices_daily (e.g. Yahoo returns up to D-1), smoke resolves target to
+MAX(trade_date) in range and runs build_features/score_all/eval_5d for that date; output includes:
+  smoke_e2e: using resolved target_date=2025-03-12 (prices_daily max in range; requested end=2025-03-13)
+  build_features: ... wrote_rows=3
+  score_all: ... wrote_rows=3 ...
+  smoke_e2e: all steps and checks passed.
+This confirms "当日首次 build_features" scenario passes end-to-end.

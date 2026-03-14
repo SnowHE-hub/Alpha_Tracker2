@@ -4,35 +4,52 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import List
 
-import akshare as ak
-import pandas as pd
 
-
-@dataclass(frozen=True)
+@dataclass
 class TradingCalendar:
     """
-    使用 AkShare 的交易日历。
-    后续如果你要换数据源/离线缓存，也只改这一层。
+    Simple trading calendar for US and HK markets.
+
+    Current implementation approximates trading days as Monday–Friday
+    business days and does not model exchange-specific holidays.
+    TODO: Replace with real US/HK exchange calendars (e.g. via
+    pandas_market_calendars) in a later iteration.
     """
 
-    def trading_days(self, start: date, end: date) -> List[date]:
-        df = ak.tool_trade_date_hist_sina()
-        if df is None or df.empty:
-            raise RuntimeError("Failed to load trading calendar from akshare")
+    def latest_trading_day(self, market: str = "US") -> date:
+        """
+        Return the latest trading day (on or before today) for the given market.
+        """
+        self._validate_market(market)
+        today = date.today()
+        d = today
+        while not self._is_business_day(d):
+            d -= timedelta(days=1)
+        return d
 
-        # 兼容列名
-        col = "trade_date" if "trade_date" in df.columns else ("交易日期" if "交易日期" in df.columns else df.columns[0])
-        days = pd.to_datetime(df[col]).dt.date.tolist()
+    def trading_days(self, start: date, end: date, market: str = "US") -> List[date]:
+        """
+        Return a list of trading days between start and end (inclusive).
+        """
+        if end < start:
+            raise ValueError("end date must be on or after start date")
+        self._validate_market(market)
 
-        return [d for d in days if start <= d <= end]
+        days: List[date] = []
+        d = start
+        while d <= end:
+            if self._is_business_day(d):
+                days.append(d)
+            d += timedelta(days=1)
+        return days
 
-    def latest_trading_day(self, today: date | None = None) -> date:
-        if today is None:
-            today = date.today()
+    @staticmethod
+    def _is_business_day(d: date) -> bool:
+        # Monday=0, Sunday=6
+        return d.weekday() < 5
 
-        # 向前找，最多回退 30 天（足够覆盖长假）
-        start = today - timedelta(days=30)
-        days = self.trading_days(start, today)
-        if not days:
-            raise RuntimeError("No trading days found in last 30 days")
-        return max(days)
+    @staticmethod
+    def _validate_market(market: str) -> None:
+        if market not in {"US", "HK"}:
+            raise ValueError(f"Unsupported market: {market!r}. Expected 'US' or 'HK'.")
+

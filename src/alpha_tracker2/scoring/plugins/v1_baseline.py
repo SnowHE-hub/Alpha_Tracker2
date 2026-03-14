@@ -1,116 +1,120 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, Any
+from dataclasses import dataclass
+from datetime import date
+from typing import Mapping
 
-import numpy as np
 import pandas as pd
 
-
-def _zscore(s: pd.Series) -> pd.Series:
-    """Safe z-score: ignore NaN; if std==0 -> 0."""
-    x = pd.to_numeric(s, errors="coerce").astype(float)
-    mu = np.nanmean(x.to_numpy())
-    sd = np.nanstd(x.to_numpy())
-    if not np.isfinite(sd) or sd == 0:
-        return pd.Series(np.zeros(len(x), dtype=float), index=x.index)
-    return (x - mu) / sd
+from alpha_tracker2.scoring.base import Scorer, ensure_score_frame
+from alpha_tracker2.storage.duckdb_store import DuckDBStore
 
 
-class V1BaselineScorer:
+@dataclass(frozen=True)
+class V1Config:
     """
-    V1 baseline scorer (JSON reason)
-    --------------------------------
-    规则型打分：动量/收益越大越好，波动越小越好。
-    目标：提供一个稳定、可解释、可对比的 baseline。
+    Simple linear V1 score based on cross-sectional z-scores.
+
+    weights: mapping factor_name -> weight. Factors must exist as columns
+             in features_daily.
     """
 
-    name = "V1"
+    weights: Mapping[str, float]
 
-    def score(self, trade_date, features: pd.DataFrame) -> pd.DataFrame:
-        df = features.copy()
 
-        # ---- required cols guard ----
-        for col in ["ticker", "ret_1d", "mom_5d", "vol_5d"]:
-            if col not in df.columns:
-                raise ValueError(f"V1 requires column '{col}' in features")
+DEFAULT_V1_WEIGHTS: dict[str, float] = {
+    # Momentum / trend proxies
+    "ret_5d": 0.5,
+    "ret_20d": 0.3,
+    # Liquidity / quality adjustments
+    "avg_amount_20": 0.2,
+}
 
-        df["ticker"] = df["ticker"].astype(str)
 
-        # name 字段（如果没有就补空，score_all 会回填）
-        if "name" not in df.columns:
-            df["name"] = None
+def _fetch_features(store: DuckDBStore, trade_date: date, columns: list[str]) -> pd.DataFrame:
+    base_cols = ["trade_date", "ticker"]
+    select_cols = base_cols + columns
+    sql = f"""
+        SELECT {', '.join(select_cols)}
+        FROM features_daily
+        WHERE trade_date = ?
+    """
+    rows = store.fetchall(sql, [trade_date.isoformat()])
+    if not rows:
+        return pd.DataFrame(columns=select_cols)
+    df = pd.DataFrame(rows, columns=select_cols)
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    return df
 
-        # ---- compute components (zscore) ----
-        z_mom = _zscore(df["mom_5d"])          # higher better
-        z_ret = _zscore(df["ret_1d"])          # higher better
-        z_vol = _zscore(df["vol_5d"])          # higher worse -> invert
 
-        w_mom, w_vol, w_ret = 0.6, 0.3, 0.1
-        score = w_mom * z_mom + w_vol * (-z_vol) + w_ret * z_ret
+class V1BaselineScorer(Scorer):
+    """
+    Baseline linear model on top of daily features.
 
-        # 缺失值：如果原始值缺失，zscore 已经是 NaN -> 这里统一变 0（中性）
-        score = pd.to_numeric(score, errors="coerce").fillna(0.0)
-        df["score"] = score
+    This scorer intentionally keeps logic simple but transparent and
+    explainable via a JSON 'reason' column.
+    """
 
-        # rank：分数越高 rank 越靠前
-        df = df.sort_values("score", ascending=False).reset_index(drop=True)
-        df["rank"] = (np.arange(len(df)) + 1).astype(int)
+    def __init__(self, cfg: V1Config | None = None) -> None:
+        self._cfg = cfg or V1Config(weights=DEFAULT_V1_WEIGHTS)
 
-        # ---- reason JSON ----
-        # 为了可解释：写入原始值 + z 值 + 加权贡献
-        reasons = []
-        n = len(df)
+    def score(self, trade_date: date, store: DuckDBStore) -> pd.DataFrame:
+        factor_names = list(self._cfg.weights.keys())
+        features = _fetch_features(store, trade_date, factor_names)
+        if features.empty:
+            return ensure_score_frame(pd.DataFrame(columns=["ticker", "score", "reason"]))
 
-        # 取前几位用于 debug（避免 JSON 过大，你也可以改成全量记录）
-        for i, row in df.iterrows():
-            mom = row.get("mom_5d")
-            ret1 = row.get("ret_1d")
-            vol = row.get("vol_5d")
+        # Work on a ticker-indexed frame
+        features = features.set_index("ticker")
 
-            # z 值（从已算好的 series 中取）
-            zm = float(z_mom.loc[row.name]) if pd.notna(z_mom.loc[row.name]) else 0.0
-            zr = float(z_ret.loc[row.name]) if pd.notna(z_ret.loc[row.name]) else 0.0
-            zv = float(z_vol.loc[row.name]) if pd.notna(z_vol.loc[row.name]) else 0.0
+        # Cross-sectional z-scores per factor
+        z_df = pd.DataFrame(index=features.index)
+        for name in factor_names:
+            series = pd.to_numeric(features[name], errors="coerce")
+            mean = series.mean()
+            std = series.std(ddof=0)
+            if std == 0 or pd.isna(std):
+                z = pd.Series(0.0, index=series.index)
+            else:
+                z = (series - mean) / std
+            z_df[name] = z
 
-            score_components = {
-                "mom_5d": {"value": None if pd.isna(mom) else float(mom), "z": zm, "weight": w_mom, "contrib": w_mom * zm},
-                "vol_5d": {"value": None if pd.isna(vol) else float(vol), "z": zv, "weight": w_vol, "contrib": w_vol * (-zv)},
-                "ret_1d": {"value": None if pd.isna(ret1) else float(ret1), "z": zr, "weight": w_ret, "contrib": w_ret * zr},
+        # Linear combination of z-scores using configured weights
+        score = pd.Series(0.0, index=z_df.index, name="score")
+        for name, w in self._cfg.weights.items():
+            if name in z_df:
+                score = score + float(w) * z_df[name].fillna(0.0)
+
+        # Build reason JSON: include raw factors, z-scores, and weights
+        out_rows: list[dict] = []
+        for ticker, s in score.items():
+            row_factors = {k: _safe_float(features.loc[ticker].get(k)) for k in factor_names}
+            row_z = {k: _safe_float(z_df.loc[ticker].get(k)) for k in factor_names}
+            payload = {
+                "model": "V1",
+                "factors": row_factors,
+                "z": row_z,
+                "weights": dict(self._cfg.weights),
             }
+            out_rows.append(
+                {
+                    "ticker": str(ticker),
+                    "score": float(s) if pd.notna(s) else None,
+                    "reason": json.dumps(payload, ensure_ascii=False),
+                }
+            )
 
-            payload: Dict[str, Any] = {
-                "universe": {"source": "features_daily", "n": int(n)},
-                "features": {"asof": str(trade_date)},
-                "signals": {
-                    "mom_5d": score_components["mom_5d"]["value"],
-                    "vol_5d": score_components["vol_5d"]["value"],
-                    "ret_1d": score_components["ret_1d"]["value"],
-                },
-                "filters": {
-                    # V1 baseline 不做硬过滤，这里留空结构，方便后续扩展
-                },
-                "rank_detail": {
-                    "score_raw": float(row["score"]),
-                    "score_components": score_components,
-                    "rank": int(row["rank"]),
-                    "method": "V1 zscore: 0.6*z(mom_5d) + 0.3*(-z(vol_5d)) + 0.1*z(ret_1d)",
-                },
-                "debug": {
-                    "legacy_fields": {
-                        # 如果你旧脚本有字段名，可以在这里做别名映射
-                        # "trend_score": "...",
-                    }
-                },
-            }
-            reasons.append(json.dumps(payload, ensure_ascii=False))
+        result = pd.DataFrame(out_rows)
+        return ensure_score_frame(result)
 
-        df["reason"] = reasons
 
-        # picked_by（可选）：写上版本名，后续 ENS/分析更好追溯
-        df["picked_by"] = "V1"
+def _safe_float(value: object) -> float | None:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(f):
+        return None
+    return float(f)
 
-        # ---- output (score_all 会补 score_100 / thr_value / pass_thr 等) ----
-        out = df[["ticker", "name", "rank", "score", "reason", "picked_by"]].copy()
-        out["trade_date"] = trade_date
-        return out

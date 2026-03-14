@@ -1,40 +1,62 @@
 from __future__ import annotations
 
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 from alpha_tracker2.core.config import load_settings
+from alpha_tracker2.core.trading_calendar import TradingCalendar
 from alpha_tracker2.storage.duckdb_store import DuckDBStore
 
 
+def _find_project_root(start: Path) -> Path:
+    """
+    Walk up from the given path until we find a directory containing configs/default.yaml.
+    """
+    current = start
+    for parent in [current, *current.parents]:
+        config_path = parent / "configs" / "default.yaml"
+        if config_path.is_file():
+            return parent
+    raise RuntimeError("Could not locate project root containing configs/default.yaml")
+
+
 def main() -> None:
-    root = Path(__file__).resolve().parents[3]
-    s = load_settings(root)
+    # Locate project root (directory that contains configs/default.yaml).
+    project_root = _find_project_root(Path(__file__).resolve())
+    settings = load_settings(project_root)
 
-    # ensure dirs
-    s.lake_dir.mkdir(parents=True, exist_ok=True)
-    s.store_db.parent.mkdir(parents=True, exist_ok=True)
-    s.runs_dir.mkdir(parents=True, exist_ok=True)
-
+    # 1) init_schema
     store = DuckDBStore(
-        db_path=s.store_db,
-        schema_path=root / "src" / "alpha_tracker2" / "storage" / "schema.sql",
+        db_path=settings.store_db,
+        schema_path=project_root / "src" / "alpha_tracker2" / "storage" / "schema.sql",
     )
     store.init_schema()
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # 2) insert into meta_runs
+    now = datetime.now()
+    run_id = now.strftime("%Y%m%d_%H%M%S")
     store.exec(
         "INSERT INTO meta_runs(run_id, run_ts, note) VALUES (?, ?, ?);",
-        (run_id, datetime.now(), "smoke"),
+        (run_id, now, "smoke"),
     )
 
-    n = store.fetchone("SELECT COUNT(*) AS n FROM meta_runs;")[0]
+    # 3) read back meta_runs count
+    row = store.fetchone("SELECT COUNT(*) FROM meta_runs;")
+    meta_runs_count = int(row[0]) if row is not None else 0
 
-    print("[OK] smoke pipeline passed (with schema).")
-    print("project_name:", s.project_name)
-    print("store_db:", s.store_db)
-    print("meta_runs_count:", n)
+    # 4) test TradingCalendar
+    cal = TradingCalendar()
+    us_today = cal.latest_trading_day("US")
+    hk_today = cal.latest_trading_day("HK")
+
+    print("[OK] smoke passed.")
+    print("project_name:", settings.project_name)
+    print("store_db:", settings.store_db)
+    print("meta_runs_count:", meta_runs_count)
+    print("latest_trading_day_US:", us_today)
+    print("latest_trading_day_HK:", hk_today)
 
 
 if __name__ == "__main__":
     main()
+

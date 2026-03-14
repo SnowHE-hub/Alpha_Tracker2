@@ -1,11 +1,6 @@
-from alpha_tracker2.core.registry import REGISTRY
-from alpha_tracker2.ingestion.plugins.mock_provider import MockUniverseProvider
-from alpha_tracker2.ingestion.plugins.mock_price_provider import MockPriceProvider
+"""
+Core infrastructure for Alpha_Tracker2 US/HK.
 
-from alpha_tracker2.ingestion.plugins.akshare_provider import AkShareUniverseProvider
-REGISTRY.universe_providers[AkShareUniverseProvider.name] = AkShareUniverseProvider
-REGISTRY.universe_providers[MockUniverseProvider.name] = MockUniverseProvider
+This package exposes configuration loading and trading calendar utilities.
+"""
 
-REGISTRY.prices_providers[MockPriceProvider.name] = MockPriceProvider
-from alpha_tracker2.ingestion.plugins.akshare_price_provider import AkSharePriceProvider
-REGISTRY.prices_providers[AkSharePriceProvider.name] = AkSharePriceProvider
